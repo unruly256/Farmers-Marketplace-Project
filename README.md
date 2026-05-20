@@ -1,2 +1,49 @@
-Farmers’ Produce Aggregation & Marketplace PlatformProject OverviewThis project is a digital aggregation and marketplace platform designed with a mobile-first approach to solve agricultural inefficiencies in Uganda. It connects farmers directly to buyers, providing transparent pricing and real-time demand visibility while supporting cooperative management oversight.Problem StatementAgricultural cooperatives and SACCOs in Uganda largely rely on manual processes, leading to limited market access, exploitation by middlemen, and poor record-keeping. This system eliminates delays in matching supply and demand through a centralized digital marketplace.Key FeaturesFarmer Management: Produce listing, harvest tracking, and order management via phone number and National ID registration.Buyer Marketplace: GPS-based produce searching and filtering by type, location, and price.Digital Transactions: Automated digital receipt generation and transaction history storage.Analytics: Historical price data and demand analytics for cooperative officers.Technical ArchitectureThe system utilizes a 3-Tier Architecture to ensure scalability for 1,000+ concurrent users and secure data isolation.Frontend: Flutter (Mobile) and Web-based Admin Dashboard.Backend: Python (FastAPI/Django) handling business logic and GPS proximity services.Database: PostgreSQL hosted on AWS RDS for relational data integrity.Infrastructure: Hosted on AWS (EC2) with integration for SMS notifications (Twilio/Africa's Talking).System ModelsThe design follows strict Software Engineering lifecycle practices, including:UML Models: Use Case, Class, Sequence, and Activity Diagrams.Database Design: Normalized relational tables (1NF, 2NF, 3NF) for users, produce listings, and transactions.Version Control StrategyWe employ a Git feature-branch workflow. Main modules are developed on separate branches and merged into the main branch only after peer review to ensure a stable prototype design. # Farmers-Marketplace-Project
-A mobile-first 3-tier digital marketplace connecting Ugandan farmers directly to buyers
+# 🌾 SAMS Market - Farmers Marketplace
+
+![Flutter](https://img.shields.io/badge/Frontend-Flutter-02569B?style=for-the-badge&logo=flutter&logoColor=white)
+![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![Python](https://img.shields.io/badge/Language-Python_3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![SQLite](https://img.shields.io/badge/Database-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
+![AWS](https://img.shields.io/badge/Hosted-AWS_EC2-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white)
+
+SAMS Market is a full-stack, direct-to-consumer e-commerce mobile application designed to bridge the gap between local farmers and buyers. By eliminating the middleman, farmers retain higher profit margins while buyers get access to fresh, affordable produce.
+
+## 🚀 Features
+
+### 👨‍🌾 Farmer Portal (Sellers)
+* **Inventory Management:** Full CRUD operations for produce (Add, Update, Delete) with image uploads.
+* **Order Processing:** Real-time dashboard to review, accept, or reject incoming buyer orders.
+* **Automated Stock Deduction:** Accepting an order automatically updates global inventory.
+* **Financial Analytics:** Live calculations of total listings, pending requests, and total revenue earned.
+
+### 🛒 Buyer Portal (Consumers)
+* **Dynamic Marketplace:** Filter, search, and browse fresh produce using a responsive Glassmorphism UI.
+* **Secure Cart System:** Multi-item cart state management with real-time total calculations.
+* **Order Tracking:** Monitor active and historical orders (Pending, Accepted, Delivered, Cancelled).
+
+### 💬 Global Features
+* **Role-Based Authentication:** Secure login routing users to their specific dashboard contexts.
+* **Real-Time Messaging:** Integrated chat system allowing Buyers and Farmers to communicate regarding specific orders.
+* **Local Caching:** Heavy utilization of `SharedPreferences` to cache profiles, produce, and orders for instant load times and offline resilience.
+
+---
+
+## 🛠️ System Architecture
+
+* **Frontend:** Built with **Flutter (Dart)** for cross-platform mobile performance. Implements a highly polished UI with custom animations, shimmer loading states, and robust network error handling.
+* **Backend:** Powered by **FastAPI (Python)**. Chosen for its extreme speed, asynchronous capabilities, and automatic OpenAPI documentation generation.
+* **Database:** **SQLite** managed via **SQLAlchemy ORM** for relational data integrity between Users, Produce, Orders, and Messages.
+* **Infrastructure:** Deployed live on an **AWS EC2 (Ubuntu)** instance using `Uvicorn`.
+
+---
+
+## 💻 Installation & Setup
+
+### 1. Backend (FastAPI)
+Navigate to the backend directory, set up your virtual environment, and run the server:
+```bash
+cd backend
+python3 -m venv venv
+source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload

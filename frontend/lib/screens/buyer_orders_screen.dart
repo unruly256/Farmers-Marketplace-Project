@@ -13,14 +13,17 @@ class BuyerOrdersScreen extends StatefulWidget {
 class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+
   List<dynamic> _allOrders = [];
+  Map<String, int> _unreadCounts = {};
   bool _isLoading = true;
+  bool _isCancelling = false;
   String _buyerPhone = "";
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 2, vsync: this);
     _loadOrders();
   }
 
@@ -30,260 +33,332 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
     super.dispose();
   }
 
-  Future<void> _loadOrders() async {
-    setState(() => _isLoading = true);
+  String _safeText(dynamic value, {String fallback = '—'}) {
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? fallback : text;
+  }
+
+  String _normalizedStatus(dynamic value) {
+    return value?.toString().trim().toLowerCase() ?? '';
+  }
+
+  String _displayStatus(dynamic value) {
+    switch (_normalizedStatus(value)) {
+      case 'accepted':
+        return 'Accepted';
+      case 'rejected':
+        return 'Rejected';
+      case 'completed':
+        return 'Completed';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'delivered':
+        return 'Delivered';
+      case 'pending':
+      default:
+        return 'Pending';
+    }
+  }
+
+  // ✅ UPDATED: Caching logic implemented here
+  Future<void> _loadOrders({bool forceRefresh = false}) async {
+    if (mounted) setState(() => _isLoading = true);
+
     final prefs = await SharedPreferences.getInstance();
     _buyerPhone = prefs.getString('userPhone') ?? "";
 
     if (_buyerPhone.isEmpty) {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _allOrders = [];
+          _unreadCounts = {};
+        });
+      }
       return;
     }
 
+    if (!forceRefresh) {
+      final cached = await ApiService.getCachedBuyerOrders(_buyerPhone);
+      if (cached.isNotEmpty && mounted) {
+        setState(() {
+          _allOrders = cached;
+          _isLoading = false;
+        });
+      }
+    }
+
     final orders = await ApiService.fetchBuyerOrders(_buyerPhone);
-    if (mounted) {
+    final unread = await ApiService.fetchUnreadCounts(_buyerPhone);
+
+    if (!mounted) return;
+
+    setState(() {
+      if (orders.isNotEmpty) _allOrders = orders;
+      _unreadCounts = unread;
+      _isLoading = false;
+    });
+
+    await ApiService.cacheBuyerOrders(_buyerPhone, _allOrders);
+  }
+
+  List<dynamic> _activeOrders() {
+    return _allOrders.where((o) {
+      final status = _normalizedStatus(o['status']);
+      return status == 'pending' || status == 'accepted';
+    }).toList();
+  }
+
+  List<dynamic> _historyOrders() {
+    return _allOrders.where((o) {
+      final status = _normalizedStatus(o['status']);
+      return ['completed', 'rejected', 'delivered', 'cancelled']
+          .contains(status);
+    }).toList();
+  }
+
+  Future<void> _cancelOrder(int orderId) async {
+    if (_isCancelling) return;
+
+    final oldOrders = List<Map<String, dynamic>>.from(
+      _allOrders.map((e) => Map<String, dynamic>.from(e as Map)),
+    );
+
+    setState(() {
+      _isCancelling = true;
+      final idx = _allOrders.indexWhere((o) => o['order_id'] == orderId);
+      if (idx != -1) {
+        _allOrders[idx]['status'] = 'Cancelled';
+      }
+    });
+
+    final response = await ApiService.cancelOrder(orderId, _buyerPhone);
+
+    if (!mounted) return;
+
+    if (response['status'] == 'success') {
+      setState(() => _isCancelling = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            response['message'] ?? 'Order cancelled successfully.',
+          ),
+          backgroundColor: Colors.grey.shade800,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      // ✅ Force refresh on successful cancel
+      await _loadOrders(forceRefresh: true);
+    } else {
       setState(() {
-        _allOrders = orders;
-        _isLoading = false;
+        _allOrders = oldOrders;
+        _isCancelling = false;
       });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(response['message'] ?? 'Failed to cancel order.'),
+          backgroundColor: Colors.red.shade700,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
-  List<dynamic> _filteredOrders(String filter) {
-    switch (filter) {
-      case 'Active':
-        return _allOrders
-            .where((o) => o['status'] == 'Pending' || o['status'] == 'Accepted')
-            .toList();
-      case 'Completed':
-        return _allOrders.where((o) => o['status'] == 'Rejected').toList();
-      default:
-        return _allOrders;
+  void _showCancelDialog(int orderId, String cropName) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(22),
+          ),
+          title: Text(
+            'Cancel Order?',
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              color: isDark ? Colors.white : Colors.black87,
+            ),
+          ),
+          content: Text(
+            'Are you sure you want to cancel your order for $cropName? This action cannot be undone.',
+            style: TextStyle(
+              color: isDark ? Colors.grey.shade400 : Colors.grey.shade700,
+              height: 1.5,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(
+                'Keep Order',
+                style: TextStyle(
+                  color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
+                ),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _cancelOrder(orderId);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red.shade600,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              child: const Text(
+                'Cancel Now',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _openChatForOrder(Map<String, dynamic> order) async {
+    final int orderId = int.tryParse((order['order_id'] ?? '0').toString()) ?? 0;
+    final String farmerName =
+        _safeText(order['farmer_name'], fallback: 'Farmer');
+    final String farmerPhone =
+        _safeText(order['farmer_phone'], fallback: '');
+    final String cropName =
+        _safeText(order['crop_name'], fallback: 'Unknown crop');
+    final int? produceId =
+        int.tryParse((order['produce_id'] ?? '').toString());
+
+    if (_buyerPhone.isEmpty || farmerPhone.isEmpty || farmerPhone == '—') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Chat is unavailable for this order right now.'),
+          backgroundColor: Colors.red.shade700,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
     }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(
+          currentPhone: _buyerPhone,
+          contactPhone: farmerPhone,
+          contactName: farmerName,
+          orderId: orderId,
+          produceId: produceId,
+          title: cropName,
+          isBuyer: true,
+        ),
+      ),
+    );
+
+    // ✅ Force refresh when coming back from chat to update unread counts
+    await _loadOrders(forceRefresh: true);
+  }
+
+  Color _pageBg(bool isDark) {
+    return isDark ? const Color(0xFF121212) : const Color(0xFFF7F8FA);
+  }
+
+  Color _surfaceColor(bool isDark) {
+    return isDark ? const Color(0xFF1E1E1E) : Colors.white;
   }
 
   Color _statusColor(String status) {
-    switch (status) {
-      case 'Accepted': return Colors.green.shade700;
-      case 'Rejected': return Colors.red.shade700;
-      case 'Pending':  return Colors.orange.shade700;
-      default:         return Colors.grey.shade600;
+    switch (status.toLowerCase()) {
+      case 'accepted':
+        return Colors.green.shade700;
+      case 'rejected':
+      case 'cancelled':
+        return Colors.red.shade700;
+      case 'pending':
+        return Colors.orange.shade700;
+      case 'completed':
+      case 'delivered':
+        return Colors.green.shade800;
+      default:
+        return Colors.grey.shade600;
     }
   }
 
-  Color _statusBg(String status) {
-    switch (status) {
-      case 'Accepted': return Colors.green.shade50;
-      case 'Rejected': return Colors.red.shade50;
-      case 'Pending':  return Colors.orange.shade50;
-      default:         return Colors.grey.shade100;
+  Color _statusBg(String status, bool isDark) {
+    switch (status.toLowerCase()) {
+      case 'accepted':
+        return isDark
+            ? Colors.green.shade900.withOpacity(0.22)
+            : Colors.green.shade50;
+      case 'rejected':
+      case 'cancelled':
+        return isDark
+            ? Colors.red.shade900.withOpacity(0.22)
+            : Colors.red.shade50;
+      case 'pending':
+        return isDark
+            ? Colors.orange.shade900.withOpacity(0.22)
+            : Colors.orange.shade50;
+      case 'completed':
+      case 'delivered':
+        return isDark
+            ? Colors.green.shade900.withOpacity(0.18)
+            : Colors.green.shade50;
+      default:
+        return isDark ? Colors.grey.shade800 : Colors.grey.shade100;
     }
   }
 
   IconData _statusIcon(String status) {
-    switch (status) {
-      case 'Accepted': return Icons.check_circle_rounded;
-      case 'Rejected': return Icons.cancel_rounded;
-      case 'Pending':  return Icons.hourglass_empty_rounded;
-      default:         return Icons.info_rounded;
+    switch (status.toLowerCase()) {
+      case 'accepted':
+        return Icons.check_circle_rounded;
+      case 'rejected':
+      case 'cancelled':
+        return Icons.cancel_rounded;
+      case 'pending':
+        return Icons.hourglass_bottom_rounded;
+      case 'completed':
+      case 'delivered':
+        return Icons.task_alt_rounded;
+      default:
+        return Icons.info_rounded;
     }
   }
 
-  String _statusMessage(String status) {
-    switch (status) {
-      case 'Accepted': return 'Farmer confirmed your order! Arrange pickup.';
-      case 'Rejected': return 'Farmer could not fulfill this order.';
-      case 'Pending':  return 'Waiting for the farmer to respond...';
-      default:         return '';
-    }
-  }
-
-  IconData _getIconForCrop(String cropName) {
-    switch (cropName.toLowerCase()) {
-      case 'maize':    return Icons.grass_rounded;
-      case 'beans':    return Icons.spa_rounded;
-      case 'tomatoes': return Icons.eco_rounded;
-      case 'matooke':  return Icons.park_rounded;
-      case 'cassava':  return Icons.energy_savings_leaf_rounded;
-      default:         return Icons.local_florist_rounded;
-    }
-  }
-
-  Widget _buildOrderCard(Map<String, dynamic> order) {
-    final String status  = order['status'] ?? 'Pending';
-    final bool isAccepted = status == 'Accepted';
-    final bool isPending  = status == 'Pending';
-
+  Widget _statusPill(String status, bool isDark) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        color: _statusBg(status, isDark),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: isAccepted
-              ? Colors.green.shade200
-              : isPending
-                  ? Colors.orange.shade200
-                  : Colors.grey.shade200,
-          width: (isAccepted || isPending) ? 1.5 : 1.0,
+          color: _statusColor(status).withOpacity(0.28),
         ),
-        boxShadow: [
-          BoxShadow(color: Colors.grey.shade100, blurRadius: 8, offset: const Offset(0, 3)),
-        ],
       ),
-      child: Column(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // --- HEADER ---
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade50,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Order #${order['order_id']}',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black87),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _statusBg(status),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(_statusIcon(status), size: 14, color: _statusColor(status)),
-                      const SizedBox(width: 4),
-                      Text(
-                        status,
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: _statusColor(status)),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+          Icon(
+            _statusIcon(status),
+            size: 13,
+            color: _statusColor(status),
           ),
-
-          // --- BODY ---
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(color: Colors.green.shade50, shape: BoxShape.circle),
-                      child: Icon(_getIconForCrop(order['crop_name'] ?? ''), color: Colors.green.shade700, size: 22),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            order['crop_name'] ?? 'Unknown crop',
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17, color: Colors.black87),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'UGX ${order['total_amount']}',
-                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: Colors.orange.shade800),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                const Divider(height: 1),
-                const SizedBox(height: 14),
-
-                Row(
-                  children: [
-                    Icon(Icons.agriculture_rounded, size: 16, color: Colors.grey.shade500),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Farmer: ${order['farmer_name']}',
-                        style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    Icon(Icons.access_time_rounded, size: 16, color: Colors.grey.shade500),
-                    const SizedBox(width: 6),
-                    Text(
-                      order['timestamp'] ?? '',
-                      style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-
-                // --- STATUS BANNER ---
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: _statusBg(status),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(_statusIcon(status), size: 16, color: _statusColor(status)),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _statusMessage(status),
-                          style: TextStyle(fontSize: 12, color: _statusColor(status), fontWeight: FontWeight.w500),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // --- CHAT BUTTON (Pending + Accepted only) ---
-                if (status != 'Rejected') ...[
-                  const SizedBox(height: 14),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => ChatScreen(
-                              currentPhone: _buyerPhone,
-                              contactPhone: order['farmer_phone'] ?? '00000',
-                              contactName: order['farmer_name'] ?? 'Farmer',
-                            ),
-                          ),
-                        );
-                      },
-                      icon: Icon(Icons.chat_bubble_outline_rounded, size: 18, color: Colors.green.shade700),
-                      label: Text(
-                        isAccepted ? 'Chat to arrange pickup' : 'Message the farmer',
-                        style: TextStyle(color: Colors.green.shade700, fontWeight: FontWeight.w600),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: Colors.green.shade200),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
+          const SizedBox(width: 5),
+          Text(
+            status,
+            style: TextStyle(
+              color: _statusColor(status),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
             ),
           ),
         ],
@@ -291,161 +366,745 @@ class _BuyerOrdersScreenState extends State<BuyerOrdersScreen>
     );
   }
 
-  Widget _buildOrderList(String filter) {
-    if (_isLoading) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(60),
-          child: CircularProgressIndicator(color: Colors.orange),
+  Widget _headerStat({
+    required bool isDark,
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: isDark ? Colors.white.withOpacity(0.04) : Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isDark
+                ? Colors.white.withOpacity(0.05)
+                : Colors.black.withOpacity(0.04),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(isDark ? 0.20 : 0.05),
+              blurRadius: 16,
+              offset: const Offset(0, 8),
+            ),
+          ],
         ),
+        child: Column(
+          children: [
+            Container(
+              height: 42,
+              width: 42,
+              decoration: BoxDecoration(
+                color: color.withOpacity(isDark ? 0.18 : 0.12),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(icon, color: color, size: 20),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              value,
+              style: TextStyle(
+                color: isDark ? Colors.white : const Color(0xFF111827),
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShimmerCard(int i) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.3, end: 0.75),
+      duration: Duration(milliseconds: 700 + (i * 80)),
+      builder: (_, op, __) {
+        return Opacity(
+          opacity: op,
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 14),
+            height: 168,
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+              borderRadius: BorderRadius.circular(24),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildOrderCard(Map<String, dynamic> order) {
+    final String rawStatus = _displayStatus(order['status']);
+    final int orderId = int.tryParse((order['order_id'] ?? '0').toString()) ?? 0;
+    final String farmerName =
+        _safeText(order['farmer_name'], fallback: 'Farmer');
+    final String farmerPhone =
+        _safeText(order['farmer_phone'], fallback: '');
+    final String cropName =
+        _safeText(order['crop_name'], fallback: 'Unknown crop');
+    final String timestamp =
+        _safeText(order['timestamp'], fallback: 'Recent order');
+    final dynamic amount = order['total_amount'] ?? 0;
+
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bool isPending = rawStatus == 'Pending';
+    final bool isAccepted = rawStatus == 'Accepted';
+    final bool isHistory =
+        ['Completed', 'Rejected', 'Delivered', 'Cancelled'].contains(rawStatus);
+    final bool canChat =
+        ['Accepted', 'Completed', 'Delivered'].contains(rawStatus) &&
+            farmerPhone.isNotEmpty &&
+            farmerPhone != '—' &&
+            _buyerPhone.isNotEmpty;
+
+    final int unreadCount = _unreadCounts[farmerPhone] ?? 0;
+
+    final Color glowColor = isPending
+        ? Colors.orange.shade600.withOpacity(isDark ? 0.28 : 0.16)
+        : isAccepted
+            ? Colors.green.shade600.withOpacity(isDark ? 0.24 : 0.12)
+            : Colors.transparent;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 240),
+      margin: const EdgeInsets.only(bottom: 14),
+      decoration: BoxDecoration(
+        color: isDark
+            ? const Color(0xFF1E1E1E)
+            : (isHistory ? Colors.grey.shade50 : Colors.white),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: isDark
+              ? Colors.white.withOpacity(0.05)
+              : Colors.black.withOpacity(0.04),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: glowColor,
+            blurRadius: 22,
+            spreadRadius: 2,
+            offset: const Offset(0, 8),
+          ),
+          BoxShadow(
+            color: Colors.black.withOpacity(isDark ? 0.22 : 0.05),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: IntrinsicHeight(
+          child: Row(
+            children: [
+              Container(
+                width: 6,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: isPending
+                        ? [Colors.orange.shade600, Colors.orange.shade400]
+                        : isAccepted
+                            ? [Colors.green.shade700, Colors.green.shade400]
+                            : [Colors.grey.shade500, Colors.grey.shade400],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Order #$orderId',
+                            style: TextStyle(
+                              color: isDark
+                                  ? Colors.grey.shade400
+                                  : Colors.grey.shade500,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          _statusPill(rawStatus, isDark),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Container(
+                            height: 44,
+                            width: 44,
+                            decoration: BoxDecoration(
+                              color: isDark
+                                  ? Colors.orange.shade700.withOpacity(0.18)
+                                  : Colors.orange.shade50,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Icon(
+                              Icons.shopping_basket_rounded,
+                              color: Colors.orange.shade700,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  cropName,
+                                  style: TextStyle(
+                                    color: isDark
+                                        ? Colors.white
+                                        : const Color(0xFF111827),
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'UGX ${amount.toString()}',
+                                  style: TextStyle(
+                                    color: Colors.orange.shade700,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      Container(
+                        height: 1,
+                        color: isDark
+                            ? Colors.white.withOpacity(0.05)
+                            : Colors.black.withOpacity(0.05),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 18,
+                            backgroundColor: isDark
+                                ? Colors.green.shade700.withOpacity(0.18)
+                                : Colors.green.shade50,
+                            child: Text(
+                              farmerName.isNotEmpty
+                                  ? farmerName[0].toUpperCase()
+                                  : 'F',
+                              style: TextStyle(
+                                color: Colors.green.shade700,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  farmerName,
+                                  style: TextStyle(
+                                    color: isDark
+                                        ? Colors.white
+                                        : const Color(0xFF111827),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  farmerPhone.isEmpty || farmerPhone == '—'
+                                      ? 'No phone available'
+                                      : farmerPhone,
+                                  style: TextStyle(
+                                    color: isDark
+                                        ? Colors.grey.shade500
+                                        : Colors.grey.shade500,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (canChat)
+                            GestureDetector(
+                              onTap: () => _openChatForOrder(order),
+                              child: Stack(
+                                clipBehavior: Clip.none,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(10),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green.shade700,
+                                      borderRadius: BorderRadius.circular(14),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.green.shade700
+                                              .withOpacity(0.28),
+                                          blurRadius: 14,
+                                          offset: const Offset(0, 8),
+                                        ),
+                                      ],
+                                    ),
+                                    child: const Icon(
+                                      Icons.chat_bubble_outline_rounded,
+                                      color: Colors.white,
+                                      size: 18,
+                                    ),
+                                  ),
+                                  if (unreadCount > 0)
+                                    Positioned(
+                                      right: -6,
+                                      top: -6,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 3,
+                                        ),
+                                        constraints: const BoxConstraints(
+                                          minWidth: 20,
+                                          minHeight: 20,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.red.shade600,
+                                          borderRadius:
+                                              BorderRadius.circular(20),
+                                          border: Border.all(
+                                            color: Colors.white,
+                                            width: 1.5,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.red.shade600
+                                                  .withOpacity(0.28),
+                                              blurRadius: 8,
+                                              offset: const Offset(0, 4),
+                                            ),
+                                          ],
+                                        ),
+                                        child: Text(
+                                          '$unreadCount',
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.schedule_rounded,
+                            size: 13,
+                            color: isDark
+                                ? Colors.grey.shade500
+                                : Colors.grey.shade500,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              timestamp,
+                              style: TextStyle(
+                                color: isDark
+                                    ? Colors.grey.shade500
+                                    : Colors.grey.shade500,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (isPending) ...[
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _isCancelling
+                                ? null
+                                : () => _showCancelDialog(orderId, cropName),
+                            icon: Icon(
+                              Icons.cancel_outlined,
+                              size: 16,
+                              color: Colors.red.shade400,
+                            ),
+                            label: Text(
+                              'Cancel Order',
+                              style: TextStyle(
+                                color: Colors.red.shade400,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 13),
+                              side: BorderSide(
+                                color: isDark
+                                    ? Colors.red.withOpacity(0.30)
+                                    : Colors.red.shade100,
+                                width: 1.4,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState({
+    required bool isDark,
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(24, 80, 24, 24),
+      children: [
+        Center(
+          child: Container(
+            width: 88,
+            height: 88,
+            margin: const EdgeInsets.only(bottom: 20),
+            decoration: BoxDecoration(
+              color: isDark
+                  ? Colors.orange.shade700.withOpacity(0.14)
+                  : Colors.orange.shade50,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, size: 40, color: Colors.orange.shade700),
+          ),
+        ),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: isDark ? Colors.white : const Color(0xFF111827),
+            fontSize: 20,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          message,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: isDark ? Colors.grey.shade500 : Colors.grey.shade600,
+            fontSize: 13,
+            height: 1.55,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOrderList(List<dynamic> orders, {required bool activeTab}) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    if (_isLoading) {
+      return ListView.builder(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+        itemCount: 5,
+        itemBuilder: (_, i) => _buildShimmerCard(i),
       );
     }
 
-    final orders = _filteredOrders(filter);
-
     if (orders.isEmpty) {
-      final msgs = {
-        'All':       ('No orders yet', 'Your order history will appear here\nonce you buy from the marketplace.'),
-        'Active':    ('No active orders', 'Place an order from the marketplace\nto get started!'),
-        'Completed': ('No completed orders', 'Accepted and rejected orders\nwill appear here.'),
-      };
-      final msg = msgs[filter] ?? ('Nothing here', '');
-
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(40),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.receipt_long_outlined, size: 60, color: Colors.grey.shade300),
-              const SizedBox(height: 16),
-              Text(msg.$1, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.grey.shade500)),
-              const SizedBox(height: 8),
-              Text(msg.$2, textAlign: TextAlign.center, style: TextStyle(color: Colors.grey.shade400)),
-            ],
-          ),
+      return RefreshIndicator(
+        // ✅ FIXED: Force true network refresh on pull
+        onRefresh: () => _loadOrders(forceRefresh: true),
+        color: Colors.orange.shade700,
+        child: _buildEmptyState(
+          isDark: isDark,
+          icon: activeTab
+              ? Icons.hourglass_empty_rounded
+              : Icons.receipt_long_outlined,
+          title: activeTab ? 'No active orders' : 'No order history yet',
+          message: activeTab
+              ? 'Orders that are pending or accepted will appear here.'
+              : 'Completed, rejected, delivered, and cancelled orders will appear here.',
         ),
       );
     }
 
     return RefreshIndicator(
-      onRefresh: _loadOrders,
+      // ✅ FIXED: Force true network refresh on pull
+      onRefresh: () => _loadOrders(forceRefresh: true),
       color: Colors.orange.shade700,
       child: ListView.builder(
-        padding: const EdgeInsets.all(20),
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
         itemCount: orders.length,
-        itemBuilder: (context, index) => _buildOrderCard(orders[index]),
+        itemBuilder: (_, i) =>
+            _buildOrderCard(Map<String, dynamic>.from(orders[i] as Map)),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final activeCount   = _filteredOrders('Active').length;
-    final acceptedCount = _allOrders.where((o) => o['status'] == 'Accepted').length;
+    final activeCount = _activeOrders().length;
+    final historyCount = _historyOrders().length;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
-      backgroundColor: Colors.grey.shade50,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      backgroundColor: _pageBg(isDark),
+      body: SafeArea(
+        child: Column(
           children: [
-            const Text(
-              'My Orders',
-              style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 20),
-            ),
-            if (acceptedCount > 0)
-              Text(
-                '$acceptedCount order${acceptedCount > 1 ? 's' : ''} accepted — ready for pickup!',
-                style: TextStyle(color: Colors.green.shade700, fontSize: 12, fontWeight: FontWeight.w500),
-              )
-            else if (activeCount > 0)
-              Text(
-                '$activeCount pending — waiting on farmers',
-                style: TextStyle(color: Colors.orange.shade700, fontSize: 12, fontWeight: FontWeight.w500),
+            Container(
+              margin: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: _surfaceColor(isDark),
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(
+                  color: isDark
+                      ? Colors.white.withOpacity(0.05)
+                      : Colors.black.withOpacity(0.04),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(isDark ? 0.24 : 0.06),
+                    blurRadius: 20,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
               ),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        height: 48,
+                        width: 48,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              Colors.orange.shade600,
+                              Colors.green.shade700,
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: const Icon(
+                          Icons.receipt_long_rounded,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Buyer Orders',
+                              style: TextStyle(
+                                color: isDark
+                                    ? Colors.white
+                                    : const Color(0xFF111827),
+                                fontSize: 21,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Track actions, chat with farmers, and manage purchases.',
+                              style: TextStyle(
+                                color: isDark
+                                    ? Colors.grey.shade400
+                                    : Colors.grey.shade600,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      _headerStat(
+                        isDark: isDark,
+                        icon: Icons.pending_actions_rounded,
+                        label: 'Active',
+                        value: '$activeCount',
+                        color: Colors.orange.shade700,
+                      ),
+                      const SizedBox(width: 12),
+                      _headerStat(
+                        isDark: isDark,
+                        icon: Icons.history_rounded,
+                        label: 'History',
+                        value: '$historyCount',
+                        color: Colors.green.shade700,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? const Color(0xFF141414)
+                          : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: TabBar(
+                      controller: _tabController,
+                      indicator: BoxDecoration(
+                        color: isDark ? Colors.grey.shade900 : Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(
+                              isDark ? 0.30 : 0.05,
+                            ),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      indicatorSize: TabBarIndicatorSize.tab,
+                      dividerColor: Colors.transparent,
+                      labelColor: isDark
+                          ? Colors.orangeAccent.shade200
+                          : Colors.orange.shade700,
+                      unselectedLabelColor: isDark
+                          ? Colors.grey.shade500
+                          : Colors.grey.shade600,
+                      labelStyle: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                      ),
+                      tabs: [
+                        Tab(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text('Active'),
+                              if (activeCount > 0) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? Colors.orange.shade700
+                                            .withOpacity(0.20)
+                                        : Colors.orange.shade50,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    '$activeCount',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.orange.shade700,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        Tab(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text('History'),
+                              if (historyCount > 0) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? Colors.green.shade700
+                                            .withOpacity(0.20)
+                                        : Colors.green.shade50,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    '$historyCount',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.green.shade700,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: TabBarView(
+                controller: _tabController,
+                children: [
+                  _buildOrderList(_activeOrders(), activeTab: true),
+                  _buildOrderList(_historyOrders(), activeTab: false),
+                ],
+              ),
+            ),
           ],
         ),
-        actions: [
-          IconButton(
-            icon: Icon(Icons.refresh_rounded, color: Colors.grey.shade700),
-            onPressed: _loadOrders,
-            tooltip: 'Refresh',
-          ),
-        ],
-        bottom: TabBar(
-          controller: _tabController,
-          labelColor: Colors.orange.shade700,
-          unselectedLabelColor: Colors.grey,
-          indicatorColor: Colors.orange.shade700,
-          indicatorWeight: 3,
-          tabs: [
-            Tab(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('All'),
-                  if (_allOrders.isNotEmpty) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(10)),
-                      child: Text('${_allOrders.length}', style: const TextStyle(fontSize: 11, color: Colors.black54)),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            Tab(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Active'),
-                  if (activeCount > 0) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(color: Colors.orange.shade100, borderRadius: BorderRadius.circular(10)),
-                      child: Text(
-                        '$activeCount',
-                        style: TextStyle(fontSize: 11, color: Colors.orange.shade800, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            Tab(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Completed'),
-                  if (acceptedCount > 0) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(color: Colors.green.shade100, borderRadius: BorderRadius.circular(10)),
-                      child: Text(
-                        '$acceptedCount',
-                        style: TextStyle(fontSize: 11, color: Colors.green.shade800, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _buildOrderList('All'),
-          _buildOrderList('Active'),
-          _buildOrderList('Completed'),
-        ],
       ),
     );
   }
