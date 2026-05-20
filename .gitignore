@@ -1,9 +1,18 @@
-# Python & Backend
-backend/venv/
-backend/__pycache__/
-backend/*.db
-backend/.env
+# Python
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+*.db
 
-# Flutter & Frontend
-frontend/build/
-frontend/.dart_tool/
+# Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# App specific
+uploads/
